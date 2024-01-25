@@ -71,6 +71,8 @@
  * Process address space name described in the config file for this device.
  */
 const char *g_dev_tag = "SHIM";
+struct timeval subEndTime;
+
 
 const unsigned int g_polling_interval[] = { 10, 10, 20, 30, 60, 100, 200, 400,
                                             600, 1000, 2000, 4000, 8000, 16000,
@@ -1338,7 +1340,7 @@ static void *doCompressIn(void *in)
     dest_sz = *qz_sess->dest_sz;
     data_fmt = qz_sess->sess_params.data_fmt;
     QZ_DEBUG("doCompressIn: Need to g_process %u bytes\n", remaining);
-
+    //printf("hw_buf_size: %d\n", src_sz);
     while (!done) {
         do {
             j = getUnusedBuffer(i, j);
@@ -1347,6 +1349,8 @@ static void *doCompressIn(void *in)
             }
         } while (-1 == j);
         QZ_DEBUG("getUnusedBuffer returned %d\n", j);
+        struct timeval prepStart, prepEnd;
+        gettimeofday(&prepStart, NULL);
 
         g_process.qz_inst[i].stream[j].src1++; /*this buffer is in use*/
         src_send_sz = (remaining < src_sz) ? remaining : src_sz;
@@ -1407,12 +1411,19 @@ static void *doCompressIn(void *in)
         }
 
         g_process.qz_inst[i].stream[j].res.checksum = 0;
+        gettimeofday(&prepEnd, NULL);
+
+        long prepTime = (prepEnd.tv_sec - prepStart.tv_sec) * 1000000L 
+                        + prepEnd.tv_usec - prepStart.tv_usec;
+        printf("Descriptor preparation time: %ld microseconds\n", prepTime);
         do {
             tag = ((unsigned long)i << 16) | (unsigned long)j;
             QZ_DEBUG("Comp Sending %u bytes ,opData.flushFlag = %d, i = %d j = %d seq = %ld tag = %ld\n",
                      g_process.qz_inst[i].src_buffers[j]->pBuffers->dataLenInBytes,
                      opData->flushFlag,
                      i, j, g_process.qz_inst[i].stream[j].seq, tag);
+            struct timeval subStartTime;
+            gettimeofday(&subStartTime, NULL);
             rc = cpaDcCompressData2(g_process.dc_inst_handle[i],
                                     g_process.qz_inst[i].cpaSess,
                                     g_process.qz_inst[i].src_buffers[j],
@@ -1420,6 +1431,12 @@ static void *doCompressIn(void *in)
                                     opData,
                                     &g_process.qz_inst[i].stream[j].res,
                                     (void *)(tag));
+            gettimeofday(&subEndTime, NULL);
+            long elapsed_time = (subEndTime.tv_sec - subStartTime.tv_sec) * 1000000 
+                        + subEndTime.tv_usec - subStartTime.tv_usec;
+
+            printf("Submission time: %ld microseconds\n", elapsed_time);
+            
             if (unlikely(CPA_STATUS_RETRY == rc)) {
                 g_process.qz_inst[i].num_retries++;
                 usleep(g_polling_interval[qz_sess->polling_idx]);
@@ -1710,7 +1727,11 @@ static void *doCompressOut(void *in)
                  g_process.qz_inst[i].stream[j].src1)  &&
                 (g_process.qz_inst[i].stream[j].sink1 ==
                  g_process.qz_inst[i].stream[j].sink2 + 1)) {
-
+                struct timeval procEndTime;
+                gettimeofday(&procEndTime, NULL); 
+                long elapsed_time = (procEndTime.tv_sec - subEndTime.tv_sec) * 1000000 
+                        + procEndTime.tv_usec - subEndTime.tv_usec;
+                printf("Processing Time: %ld microseconds\n", elapsed_time);
                 good = 1;
                 QZ_DEBUG("doCompressOut: Processing seqnumber %2.2d "
                          "%2.2d %4.4ld, PID: %d, TID: %lu\n",
@@ -2014,7 +2035,6 @@ int qzCompressCrcExt(QzSession_T *sess, const unsigned char *src,
             return rc;
         }
     }
-
     qz_sess = (QzSess_T *)(sess->internal);
 
     DataFormatInternal_T data_fmt = qz_sess->sess_params.data_fmt;
@@ -2125,6 +2145,9 @@ int qzCompressCrcExt(QzSession_T *sess, const unsigned char *src,
     if (*src_len % qz_sess->sess_params.hw_buff_sz) {
         reqcnt++;
     }
+    printf("reqcnt :%d\nsrclen: %d\nhw_buff_sz: %d\nreq_cnt_threshold: %d\n",
+            reqcnt, *src_len, qz_sess->sess_params.hw_buff_sz, 
+            qz_sess->sess_params.req_cnt_thrshold);
 
     if (reqcnt > qz_sess->sess_params.req_cnt_thrshold) {
         pthread_create(&(qz_sess->c_th_i), NULL, doCompressIn, (void *)sess);
